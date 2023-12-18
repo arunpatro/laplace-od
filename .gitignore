@@ -1,2 +1,8 @@
 bdd100k
 cifar10
+
+pycocotools
+torchvision
+*.pyc
+__pycache__
+wandb
