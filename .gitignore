@@ -6,3 +6,4 @@ torchvision
 *.pyc
 __pycache__
 wandb
+.ruff_cache

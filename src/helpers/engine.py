@@ -7,6 +7,47 @@ import torchvision.models.detection.mask_rcnn
 from . import utils
 from .coco_eval import CocoEvaluator
 from .coco_utils import get_coco_api_from_dataset
+from tqdm import tqdm
+
+
+def get_metrics(model, data_loader, device):
+    model.train()
+    full_loss_dict = []
+    full_ece_data = []
+    for images, targets in tqdm(data_loader):
+        images = list(image.to(device) for image in images)
+        targets = [
+            {
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
+                for k, v in t.items()
+            }
+            for t in targets
+        ]
+        with torch.cuda.amp.autocast(False), torch.inference_mode():
+            loss_dict, ece_data = model(images, targets)
+            full_loss_dict.append(loss_dict)
+            full_ece_data.append(ece_data)
+
+    final_ece_data = {}
+    for layer in ["prop", "det"]:
+        final_ece_data[layer] = {
+            "probs": torch.hstack(
+                [ece_data[layer]["probs"] for ece_data in full_ece_data]
+            ),
+            "labels": torch.hstack(
+                [ece_data[layer]["labels"] for ece_data in full_ece_data]
+            ),
+        }
+
+    metrics = {
+        "losses": {
+            k: torch.stack([loss_dict[k] for loss_dict in full_loss_dict]).mean()
+            for k in full_loss_dict[0].keys()
+        },
+        "ece_data": final_ece_data,
+    }
+
+    return metrics
 
 
 def train_one_epoch(
@@ -35,7 +76,7 @@ def train_one_epoch(
             for t in targets
         ]
         with torch.cuda.amp.autocast(enabled=scaler is not None):
-            loss_dict = model(images, targets)
+            loss_dict, ece_data = model(images, targets)
             losses = sum(loss for loss in loss_dict.values())
 
         # reduce losses over all GPUs for logging purposes
@@ -83,7 +124,7 @@ def _get_iou_types(model):
 
 
 @torch.inference_mode()
-def evaluate(model, data_loader, device, wandbrun=None, coco_evaluator=None):
+def evaluate(model, data_loader, device, coco_evaluator=None, wandbrun=None):
     n_threads = torch.get_num_threads()
     # FIXME remove this and make paste_masks_in_image run on the GPU
     torch.set_num_threads(1)
@@ -103,7 +144,7 @@ def evaluate(model, data_loader, device, wandbrun=None, coco_evaluator=None):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         model_time = time.time()
-        outputs = model(images)
+        outputs, _ = model(images)
 
         outputs = [{k: v.to(cpu_device) for k, v in t.items()} for t in outputs]
         model_time = time.time() - model_time
